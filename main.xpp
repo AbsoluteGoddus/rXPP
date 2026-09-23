@@ -1,0 +1,7 @@
+class A {}
+struct B {}
+enum C {}
+enum class D {}
+enum struct E {}
+return 1 + 2 + 3;
+return 1 + 2 + 3;
