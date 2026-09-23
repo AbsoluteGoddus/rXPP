@@ -30,8 +30,10 @@ fn main() {
     lexer.source = source;
     let tokens = lexer.tokenize();
 
+    println!("[{}] tokens: {:#?}", "DEBUG".green(), tokens);
+
     let mut parser: Parser = Parser::new(tokens);
 
     let asts = parser.parse();
-    println!("[{}] tokens: {:#?}", "DEBUG".green(), asts);
+    println!("[{}] Vec<ASTNode>: {:#?}", "DEBUG".green(), asts);
 }

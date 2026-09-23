@@ -6,9 +6,7 @@ use std::mem::discriminant;
 pub enum ASTNodeStmt {
     StmtEmpty {}, // Empty statement. Essentially just `;`.
     StmtReturn { expr: ASTNodeExpr },
-    StmtScope {
-        content: Box<ASTNode>,
-    },
+    StmtScope { content: Box<ASTNode> },
 }
 
 // Decl = Declaration
@@ -16,16 +14,23 @@ pub enum ASTNodeStmt {
 pub enum ASTNodeDecl {
     // All DeclGroupings are essentially equivalent to how C++ handles `private: [...]` inside a struct. Note that content must be enclosed within Brackets.
     // Note that groupings overwrite individual modifiers if applicable.
-    DeclGroupingPrivate {},
-    DeclGroupingDefine {},
-    DeclGroupingPublic {},
-    DeclGroupingRequire {},
-    DeclScope{
+    DeclGroupingPrivate {
+        body: Box<ASTNodeDecl>,
+    },
+    DeclGroupingDefine {
+        body: Box<ASTNodeDecl>,
+    },
+    DeclGroupingPublic {
+        body: Box<ASTNodeDecl>,
+    },
+    DeclGroupingRequire {
+        body: Box<ASTNodeDecl>,
+    },
+    DeclScope {
         body: Vec<ASTNodeDecl>,
     },
 
     DeclStruct {
-        kind: ASTNodeDeclStructKind,
         body: Box<ASTNodeDecl>,
     },
     // Enums will be done later, as they have quite unique syntax when compared to other data structures.
@@ -42,7 +47,7 @@ pub enum ASTNodeDecl {
         ident: String,
         ret: String,
         args: Vec<Box<ASTNodeDecl>>, // Args are ASTNodeDecl::DeclVariable instances.
-        body: Vec<ASTNodeStmt>,          // Body can be a set of Decls and or Stmts, thus it uses ASTNodeStmt::StmtScope.
+        body: Vec<ASTNodeStmt>, // Body can be a set of Decls and or Stmts, thus it uses ASTNodeStmt::StmtScope.
     },
 }
 
@@ -74,12 +79,6 @@ pub enum ASTNodeDeclVariableInitKind {
     None,                                  // E.g., `int foo;`
     DirectInit { args: Vec<ASTNodeExpr> }, // E.g., `int foo(1);`
     AssignInit { right: ASTNodeExpr },     // E.g., `int foo = 1;`
-}
-
-#[derive(Debug)]
-pub enum ASTNodeDeclStructKind {
-    Class,
-    Struct,
 }
 
 #[derive(Debug)]
@@ -305,6 +304,7 @@ impl Parser {
 
         let mut modifiers = ASTNodeDeclModifiers::new();
         let mut out: ASTNodeDecl;
+        let mut is_datatype: bool = false;
         let mut ident: String;
         let mut r#type: String;
         let mut t: SpannedToken;
@@ -318,7 +318,7 @@ impl Parser {
                 Token::TkStatic => modifiers.is_static = true,
                 Token::TkConst => modifiers.is_const = true,
                 Token::TkIdentLiteral { name } => {
-                    if self.symbol_table.contains(&name) {
+                    if !is_datatype && self.symbol_table.contains(&name) {
                         r#type = name;
                     } else {
                         ident = name; // There can only be one identifier, and it must be at the end of the declaration before either the body or the argument list.
@@ -326,14 +326,14 @@ impl Parser {
                     }
                 }
                 Token::TkEnum => match kind {
-                    Kind::Undefined => kind = Kind::Enum,
+                    Kind::Undefined => { kind = Kind::Enum; is_datatype = true },
                     _ => panic!(
                         "Encountered `enum` declaration after specifying the declaration to be of type: {:?}",
                         kind
                     ),
                 },
                 Token::TkClass => match kind {
-                    Kind::Undefined => kind = Kind::Class,
+                    Kind::Undefined => { kind = Kind::Class; is_datatype = true },
                     Kind::Enum => kind = Kind::EnumClass,
                     _ => panic!(
                         "Encountered `class` declaration after specifying the declaration to be of type: {:?}",
@@ -341,7 +341,7 @@ impl Parser {
                     ),
                 },
                 Token::TkStruct => match kind {
-                    Kind::Undefined => kind = Kind::Struct,
+                    Kind::Undefined => { kind = Kind::Struct; is_datatype = true },
                     Kind::Enum => kind = Kind::EnumStruct,
                     _ => panic!(
                         "Encountered `struct` declaration after specifying the declaration to be of type: {:?}",
@@ -368,6 +368,7 @@ impl Parser {
                 match p.token {
                     Token::TkMiscParenL => depth += 1,
                     Token::TkMiscParenR => depth -= 1,
+                    Token::TkOpAssign => { kind = Kind::Variable; break; }
                     _ => {}
                 }
                 if depth == 0 {
@@ -377,7 +378,7 @@ impl Parser {
             let p = self.peek_one(None);
             match p.token {
                 Token::TkMiscBraceL => kind = Kind::Function,
-                Token::TkOpAssign => kind = Kind::Variable,
+                Token::TkOpAssign => kind = Kind::Variable, // Should be unreachable, but I won't bother to remove it, as I am not 100% sure.
                 Token::TkMiscSemi => kind = Kind::Variable,
                 _ => panic!(
                     "Found invalid declaration. Expected either `{{` or `;` token, but found: `{:?}` instead.",
@@ -388,6 +389,27 @@ impl Parser {
         }
 
         match kind {
+            Kind::Class => {
+                self.stack_retreat_(1); // Un-consume the '{'.
+                let body = Box::from(self.consume_decl_scope());
+                out = ASTNodeDecl::DeclStruct {
+                    body: Box::from(ASTNodeDecl::DeclGroupingPrivate {
+                        body
+                    })
+                }
+            }
+            Kind::Struct => {
+                self.stack_retreat_(1);
+                let body = Box::from(self.consume_decl_scope());
+                out = ASTNodeDecl::DeclStruct {
+                    body: Box::from(ASTNodeDecl::DeclGroupingPublic {
+                        body
+                    })
+                }
+            }
+            Kind::Variable => {
+                panic!("Variable Declaration is not yet supported.");
+            }
             k => panic!("Encountered unhandled declaration kind: {:?}", k),
         }
 
@@ -483,15 +505,48 @@ impl Parser {
 
     // A DeclScope is limited compared to a Stmt scope, in that it cannot contain executable code, but only other Decls.
     fn consume_decl_scope(&mut self) -> ASTNodeDecl {
-        let depth = 1;
+        let mut depth = 1;
         self.peek_one(Some(Token::TkMiscBraceL));
-        let v: Vec<ASTNodeDecl> = Vec::new();
+        let mut v: Vec<ASTNodeDecl> = Vec::new();
         loop {
             let p = self.preview_one();
-            match p.token {
-                Token::TkStruct =>
-                _ => panic!("Found unhandled Token: {:?}, whilst trying to consume DeclScope.", p);
+            match p.clone().token {
+                // TODO: Add the ability to parse vis-scopes, e.g., `public: {...}`
+                Token::TkStruct => v.push(self.consume_decl()),
+                Token::TkClass => v.push(self.consume_decl()),
+                Token::TkEnum => v.push(self.consume_decl()),
+                Token::TkConst => v.push(self.consume_decl()),
+                Token::TkStatic => v.push(self.consume_decl()),
+                Token::TkPub => v.push(self.consume_decl()),
+                Token::TkIdentLiteral { name } => {
+                    if self.symbol_table.contains(&name) {
+                        v.push(self.consume_decl());
+                    } else {
+                        panic!("Found stray Identifier inside of a DeclScope: {:?}", p);
+                    }
+                }
+                Token::TkMiscBraceL => {
+                    depth += 1;
+                    println!("Found Stray scope inside of DeclScope?");
+                }
+                Token::TkMiscBraceR => {
+                    depth -= 1;
+                }
+                _ => panic!(
+                    "Found unhandled Token: {:?}, whilst trying to consume DeclScope.",
+                    p
+                ),
             }
+
+            if depth == 0 { break; }
+        }
+
+        self.peek_one(Some(Token::TkMiscBraceR)); // Consume the closing bracket.
+
+        self.apply_();
+
+        ASTNodeDecl::DeclScope {
+            body: v
         }
     }
 
